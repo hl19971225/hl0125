@@ -1,0 +1,568 @@
+投屏服务
+
+投屏服务是要遵循一定得协议，如dlna，airplay ，miracast等协议，其中比较好用得是最为普及得dlna协议，其协议在大部分得大屏中是内置得。而里面又会包含其他得组播协议，如ssdp协议
+
+向网络中得组播地址发送ssdp发现就可以发现所有局域网得大屏
+
+var text = "M-SEARCH * HTTP/1.1\r\n
+HOST:239.255.255.250:1900\r\n
+MAN:\"ssdp:discover\"\r\n
+ST:urn:schemas-upnp-org:device:MediaRenderer:1\r\n
+MX:3\r\n\r\n";
+
+
+    笔者用c++结合asio实现了dlna得整个协议，但是发现使用nodejs 更为方便，更节省时间，当然也可以用java，整个流程和原理都是一样得，使用更为高级得语言更为简洁，也有助于更为高效率地解决实际问题，抛开某些细节。
+    一下为nodejs得代码,为了测试，同时启动了一个ffmpeg进程去发送测试canvas，这个可以忽略。
+
+/**
+ *  Copyright (c) 2021-present, 钱波 蒙斯特咨询, Inc.
+ *  All rights reserved.
+ *
+ */
+const child_process = require('child_process');
+const express = require('express');
+const bodyParser = require('body-parser')
+const WebSocketServer = require('ws').Server;
+const http = require('http');
+const url = require('url');
+const SSDPClient = require('node-ssdp').Client
+const MediaRendererClient = require('upnp-mediarenderer-client');
+const xmlreader = require("xmlreader");
+
+
+var ssdpclient = new SSDPClient();
+var renderMap = new Map();
+const app = express();
+//设置跨域访问
+app.all('*', function(req, res, next) {
+  res.header("Access-Control-Allow-Origin", "*");
+  res.header("Access-Control-Allow-Headers","content-type");
+  //res.header("Access-Control-Allow-Headers", "X-Requested-With");
+  res.header("Access-Control-Allow-Methods","PUT,POST,GET,DELETE,OPTIONS");
+  
+  //res.header("Content-Type", "application/json;charset=utf-8");
+  //res.header('Access-Control-Allow-Credentials', true);
+  res.header("")
+  res.header("X-Powered-By",'3.2.1');
+  if (req.method.toLowerCase() == 'options')
+    res.send(200);  //让options尝试请求快速结束
+  else
+    next();
+});
+// parse application/x-www-form-urlencoded
+app.use(bodyParser.urlencoded({ extended: false }))
+// parse application/json
+app.use(bodyParser.json())
+
+
+
+app.use(express.static(__dirname + '/www'));
+
+app.get("/",function(req,res){
+     
+  res.json({ret:"ok"});
+});
+
+app.get("/screen/upnp",function(req,res){
+  var obj = [];
+  var num = 0;
+  renderMap.forEach(function (value, key, map) {
+     obj.push({ip:key,name:value.LOCATION,fname:value.friendlyName});
+     num++;
+  });
+  if(num > 0)
+  {
+     res.json({code:1, devices:obj});
+  }
+  else
+     res.json({code:0,devices:[{ip:"not find",name:"not find"}]});
+});
+
+function URLAnalyse(url){
+ //let url = obj.url;
+
+ //记录屏幕链接的url
+ const myURL = new URL(obj.url);
+ //if(obj.xurl == undefined)
+ //  return;
+ let temp = myURL.pathname; //"/live/1001"
+ let ss = temp.split(".");
+ let xurl = temp;
+ if(ss.length == 2)
+    xurl = ss[0];
+ console.log("xurl is :",xurl);
+  
+}
+function start_post_screen(ip,url){
+
+  var options = {
+    autoplay: true,
+    contentType: 'video/x-flv',
+    metadata: {
+      title: 'title',
+      creator: 'qianbo',
+      type: 'video', // can be 'video', 'audio' or 'image'
+    }
+  };
+
+  console.log("ip is:",ip);
+  let value = renderMap.get(ip);
+  if(!value){
+    console.log("can not find the ip of:",ip);
+    return;
+  }
+  if (value.playing == true) {
+    value.MediaRender.stop();
+    value.playing = false;
+  }
+  if (value.playing == false) {
+    value.playing = true;
+    value.MediaRender.load(g_httpflvurl, options, function (err, result) {
+      if (err) throw err;
+      console.log('playing ...');
+    });
+  }
+}
+function stop_post_screen(ip){
+  console.log("ip is:",ip);
+  let value = renderMap.get(ip);
+  if(!value){
+    console.log("can not find the ip of:",ip);
+    return;
+  }
+  if (value.playing == true) {
+    value.MediaRender.stop();
+    value.playing = false;
+  }
+}
+
+//得到xml描述文件中的friendlyName 
+function get_describe_xml_fname(url,ip) {
+  const myURL = new URL(url);
+  //if(obj.xurl == undefined)
+  //  return;
+  //console.log(myURL);
+
+  http.get({
+      'host':myURL.hostname,
+      path:myURL.pathname,
+      port:myURL.port},
+      function(res){
+        res.setEncoding('utf-8');
+        res.on('data',function(data){  
+          //console.log('服务端响应回来的数据为：'+data);
+          xmlreader.read(data, function (errors, response) {
+              if (null !== errors) {
+                  console.log(errors)
+                  return;
+              }
+              let fname = response.root.device.friendlyName.text();
+              let value = renderMap.get(ip);
+              if(value){
+                value.friendlyName = fname;
+              }
+              //console.log(response.text());
+          });
+        });
+   })
+}
+
+
+var g_httpflvurl = "http://192.168.0.129:8080/live/1001.flv";
+app.post("/post/screen/start",function(req,res){
+  console.log("/post/screen/start",req.body);
+ 
+  let obj = req.body;
+  let ip = obj.ip;
+  if(ip.length == 0){
+    console.log("stop it! ip length is 0");
+  }
+  
+  for (let i = 0; i < ip.length; i++) {
+    start_post_screen(ip[i],g_httpflvurl);
+  }
+  res.json({code:1});
+})
+
+
+app.post("/post/screen/stop",function(req,res){
+  console.log("/post/screen/stop",req.body);
+  let obj = req.body;
+  let ips = obj.ip;
+  for(let i =0;i< ips.length;i++)
+  {
+    stop_post_screen(ips[i]);
+  }
+  // renderMap.forEach(function (value, key, map) {
+  //   if(value.playing == true && value.xurl == obj.xurl)
+  //     value.MediaRender.stop();
+  // });
+  res.json({code:1});
+})
+
+app.post("/post/screen/volume/get",function(req,res){
+
+  console.log("get volume value...");
+  let obj = req.body;
+  let ip = obj.ip;
+  let render = renderMap.get(ip);
+  if(!render){
+    console
+    res.json({code:-1});
+    return;
+  }
+  render.MediaRender.getVolume(function(err,value) {
+    if(err){
+      res.json({code:-1,volume:0});
+      return;
+    } //throw err;
+    console.log("volume is ",value); // the volume range is 0-100
+    res.json({code:0,volume:value});
+  });
+});
+
+app.post("/post/screen/volume/set",function(req,res){
+  console.log("set volume value...");
+  let obj = req.body;
+  let ip = obj.ip;
+  let value = obj.value;
+  let render = renderMap.get(ip);
+  if(!render){
+    res.json({code:-1});
+    return;
+  }
+  render.MediaRender.setVolume(value, function(err) {
+    if(err) throw err;
+    console.log("set volume", value);
+  });
+  res.json({code:0});
+});
+
+
+
+ssdpclient.on('notify', function () {
+  //console.log('Got a notification.')
+})
+
+ssdpclient.on('response', function inResponse(headers, code, rinfo) {
+	console.log("where it is");
+  if (code == 200) {
+    console.log("headers:",headers);
+      if (!renderMap.has(rinfo.address)) {
+          var screen = {};
+          screen.LOCATION = headers.LOCATION;
+          screen.MediaRender  = new MediaRendererClient(headers.LOCATION);
+          screen.playing = false;
+          screen.url = "";
+          screen.xurl = "";
+          screen.friendlyName="";
+          renderMap.set(rinfo.address, screen);
+          //得到友好名称，显示在上面
+          get_describe_xml_fname(headers.LOCATION,rinfo.address);
+      }
+  }
+})
+
+ssdpclient.search('urn:schemas-upnp-org:device:MediaRenderer:1')
+//client.search('urn:schemas-upnp-org:service:ContentDirectory:1')
+
+// Or maybe if you want to scour for everything after 5 seconds
+setInterval(function () {
+  ssdpclient.search('urn:schemas-upnp-org:device:MediaRenderer:1')
+  //ssdpclient.search('ssdp:all')
+}, 5000)
+
+const port = 8088;
+const server = http.createServer(app).listen(port, () => {
+  console.log(`Listening at port ${port}...`);
+});
+const wsserver = new WebSocketServer({
+  server: server
+});
+
+wsserver.on('connection', (ws, req) => {
+   //以下为ffmpeg转发代码，省略
+
+
+  ]);
+  
+  // If FFmpeg stops for any reason, close the WebSocket connection.
+  ffmpeg.on('close', (code, signal) => {
+    console.log('FFmpeg child process closed, code ' + code + ', signal ' + signal);
+    ws.terminate();
+  });
+  
+  // Handle STDIN pipe errors by logging to the console.
+  // These errors most commonly occur when FFmpeg closes and there is still
+  // data to write.  If left unhandled, the server will crash.
+  ffmpeg.stdin.on('error', (e) => {
+    console.log('FFmpeg STDIN INFO', e);
+  });
+  
+  // FFmpeg outputs all of its messages to STDERR.  Let's log them to the console.
+  ffmpeg.stderr.on('data', (data) => {
+  //  console.log('FFmpeg STDERR:', data.toString());
+  });
+
+
+
+
+  // When data comes in from the WebSocket, write it to FFmpeg's STDIN.
+  ws.on('message', (msg) => {
+    if(typeof(msg) == 'string'){
+      //msg.split
+      //start 命令
+      //stop  命令
+    } 
+    else  {
+      //二进制数据
+      ffmpeg.stdin.write(msg);
+    }
+  });
+  
+  // If the client disconnects, stop FFmpeg.
+  ws.on('close', (e) => {
+    ffmpeg.kill('SIGINT');
+    //关闭其中的一个
+    renderMap.forEach(function (value, key, map) {
+      //console.log(key,value);
+      console.log(ws.xurl + "=>close");
+      if(ws.xurl == value.xurl)
+        value.MediaRender.stop();
+   });
+  });
+  
+});
+
+
+
+
+vue前端
+
+    vue前端就比较简单了，不是说vue简单，是做得简单，只是使用了vue.js 和 axios,截一个图上来，列表中会得到所有可以投屏得大屏，这样可以直接把rtsp，rtmp等服务直接投到大屏上，只要大屏支持就行，笔者测试得大屏对于这些协议都是支持得。
+
+    整个流程是这样得，发布投屏时，使用canvas得captureStream 将h264编码通过websocket发送到服务端，服务端则将接收到得h264通过ffmpeg直接转发到流媒体服务器，为了简单示例是可以这么做得，但是注意要产品话，还是自己做一个ws得服务端去做融合转发，笔者在c++中是使用了自己得websocket服务器，使用asio制作，在笔者得文章中有全部得代码，自己可以找到，寻者获知。
+
+vue
+
+<!doctype html>
+<html>
+
+<head>
+  <meta charset="utf-8">
+  <link rel="stylesheet" href="css/custom.css" type="text/css" />
+  <script src="js/canvasFill.js"></script>
+  <script src="https://cdn.staticfile.org/vue/2.2.2/vue.min.js"></script>
+  <script src="https://unpkg.com/axios/dist/axios.min.js"></script>
+  <script src="https://cdn.bootcss.com/jquery/3.2.1/jquery.min.js"></script>
+
+</head>
+
+<body>
+  <div id="post_screen">
+    <h4 class="clearfix">链接屏幕{{message}}</h4>
+    <button id="startpost">投屏</button> 
+    <button id="stoppost">结束投屏</button>
+    <span>音量:{{volumevalue}}</span>
+    <table class="dataintable">
+      <tbody>
+        <tr>
+          <th width="10%">选择</th>
+          <th width="10%">编号</th>  
+          <th width="30%">名称</th>
+          <th width="30%">描述IP</th>
+          <th width="10%">动作1</th>
+          <th width="10%">动作2</th>
+        </tr>
+        <tr v-for="(r,index) in rows">
+          <td><input type="checkbox" @click="selectNames(r.ip)"></td>
+          <td>{{index}}</td>
+          <td>{{r.fname}}</td>
+          <td>{{r.ip}}</td>
+          <td><button @click="post_get_volume(r.ip)">得到音量</button></td>
+          <td><button @click="post_set_volume(r.ip,40)">设置音量</button></td> 
+
+        </tr>
+      </tbody>
+    </table>
+    <span>选中 :{{checkNames}}</span>
+  </div>
+
+  <canvas width="640" height="360"></canvas>
+
+  <script>
+  Array.prototype.indexOf = function (val) {
+    for (var i = 0; i < this.length; i++) {
+      if (this[i] == val) return i;
+    }
+    return -1;
+  };
+  Array.prototype.remove = function(val) { 
+    var index = this.indexOf(val); 
+    if (index > -1) { 
+      this.splice(index, 1); 
+    } 
+  };
+    var g_checkname = [];
+    $(document).ready(function () {
+      //发起请求
+      //通过screen upnp协议获取所有硬件列表
+      var g_url = "/live/1001";
+      var g_wsobj ={} ;
+      g_wsobj.connected = false;
+
+      var g_mediaRecorder;
+      var g_mediaStream;
+      var vm = new Vue({
+        el: '#post_screen',
+        data: {
+          message: '测试中',
+          // ip: '192.168.0.102',
+          // name: '电视',
+          rows: [{ip:"0.0.0.0",name:"xxxx",fname:"xxxx"}],
+          checkNames:[],
+          volumevalue:0
+        },
+
+        methods:{
+          selectNames(val){
+            if(!event.target.checked){
+              this.checkNames.remove(val);
+            }else{
+              if(this.checkNames.indexOf(val)==-1){
+                this.checkNames.push(val);
+              }
+            }
+            g_checkname = this.checkNames;
+            console.log("g_checkname:",g_checkname);
+          },
+          getData(){
+            //http://
+            axios.get("/screen/upnp").then((_data)=>{
+              this.rows = _data.data.devices;
+            });
+          },
+          post_get_volume(ip) {
+            let xdata = {ip:ip};
+            axios.post("/post/screen/volume/get",xdata).then((_data)=>{
+              this.volumevalue = _data.data.volume;
+              //this.rows = _data.data.devices;
+            });
+            console.log(ip);
+          },
+          post_set_volume(ip,num){
+            let xdata = {ip:ip,value:num};
+            axios.post("/post/screen/volume/set",xdata).then((_data)=>{
+              this.volumevalue = num;
+              //this.rows = _data.data.devices;
+            });
+          },
+          updateData(){
+            setInterval(() => {
+              axios.get("screen/upnp").then((_data)=>{
+                //console.log(_data.data.devices);
+                this.rows = _data.data.devices});
+              },5000);
+          }
+        },
+        created(){
+            this.getData();
+        },
+        mounted(){
+            this.updateData();
+        },
+        
+      })
+
+
+    
+      $("#startpost").click(function(){
+       // alert("startpost");
+          let checklen = g_checkname.length;
+          if(checklen == 0){
+              alert("请选择投屏");
+              return;
+          }
+          if (g_wsobj.connected == true) {
+            g_wsobj.ws.close();
+            g_wsobj.connected = false;
+          }
+          let addr = "ws://127.0.0.1:8088" + g_url;
+
+          g_wsobj.ws = new WebSocket(addr);
+          g_wsobj.ws.onopen = function () {
+          console.log('WebSocket Open');
+          g_wsobj.connected = true;
+          //return;
+          g_mediaStream = document.querySelector('canvas').captureStream(20); // 10 FPS
+          g_mediaRecorder = new MediaRecorder(g_mediaStream, {
+            mimeType: 'video/webm;codecs=h264',
+            videoBitsPerSecond: 500000
+          });
+
+          g_mediaRecorder.addEventListener('dataavailable', (e) => {
+            console.log("data here");
+
+            if (g_wsobj.connected = true)
+              g_wsobj.ws.send(e.data);
+          });
+
+
+          g_mediaRecorder.start(1000); // Start recording, and dump data every second
+
+
+          let xdata = {ip:g_checkname,url:"live/1001.flv"};
+          axios.post("/post/screen/start", xdata).then(res => {
+              console.log('res=>', res);
+          });
+           
+          // for (let j = 0; j < checklen; j++) {
+          //     let sip = g_checkname[j];
+          //     console.log("let the ip :",sip);
+          //     let xdata = { ip: sip, url: "http://192.168.0.129:8080" + g_url + ".flv" };
+          //     axios.post("/post/screen/start", xdata).then(res => {
+          //       console.log('res=>', res);
+          //     });
+          // }
+        }
+        ///
+        g_wsobj.ws.onmessage = function (evt) {
+
+        };
+      
+
+        g_wsobj.ws.onclose = function () {
+          console.log('WebSocket Close finished');
+          g_wsobj.connected = false;
+
+          g_mediaRecorder.stop();
+        };
+      ///
+    }); //startpost click
+//
+    $("#stoppost").click(function(){
+      //alert("stoppost");
+      //let data = { xurl: g_url };
+      let xdata = {ip:g_checkname};
+      axios.post("/post/screen/stop",xdata).then(res=>{
+        console.log('res=>',res);            
+      });      
+      if(g_wsobj.connected == true)
+      {
+         g_wsobj.ws.close();
+      }
+    })
+///
+
+  });
+</script>
+
+</body>
+</html>
+
+结论
+
+     结论就是：如果读者您需要真得获取协议上面得知识，建议使用c或者c++去实现一遍，包括使用抓包工具去整个做实现，笔者使用过几个开源得upnp协议包，不是出现这个问题，就是出现那个问题，最后自己实现了，反而将程序极简化，因为事实上，协议只是协议，并不是实现，实现是要做结合，懂得架构知识体系，最终一句话，做一个产品是不简单得。
+
+其完整得打包代码在这里：【提醒是付费得】
+代码
